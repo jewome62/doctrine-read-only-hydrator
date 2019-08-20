@@ -73,6 +73,8 @@ class SimpleObjectHydrator extends ArrayHydrator
         $entity = $this->createEntity($classMetaData, $data);
         $reflection = new \ReflectionObject($entity);
 
+        $data = $this->importEmbeddedData($classMetaData, $data);
+
         foreach ($data as $name => $value) {
             if (isset($mappings[$name]) && is_array($value)) {
                 switch ($mappings[$name]['type']) {
@@ -93,9 +95,14 @@ class SimpleObjectHydrator extends ArrayHydrator
                 }
             }
 
+            if(isset($classMetaData->embeddedClasses[$name])){
+                $value = $this->hydrateEmbedded($classMetaData, $name, $value);
+            }
+
             if (
                 $classMetaData->inheritanceType === ClassMetadata::INHERITANCE_TYPE_SINGLE_TABLE
                || $classMetaData->inheritanceType === ClassMetadata::INHERITANCE_TYPE_JOINED
+               || $reflection->hasProperty($name)
             ) {
                try {
                    $property = $reflection->getProperty($name);
@@ -103,7 +110,7 @@ class SimpleObjectHydrator extends ArrayHydrator
                    continue;
                }
             } else {
-                $property = $reflection->getProperty($name);
+                $property = $this->getPrivateProperty($entity, $name);
             }
 
             if ($property->isPublic()) {
@@ -237,8 +244,29 @@ class SimpleObjectHydrator extends ArrayHydrator
      */
     protected function getPrivatePropertyValue($object, $property)
     {
+        $reflection = $this->getPrivateProperty($object, $property);
+
+        $accessible = $reflection->isPublic();
+        $reflection->setAccessible(true);
+        $value = $reflection->getValue($object);
+        $reflection->setAccessible($accessible === false);
+
+        return $value;
+    }
+
+    /**
+     * @param object $object
+     * @param string $property
+     * @return \ReflectionProperty
+     * @throws \Exception
+     */
+    protected function getPrivateProperty($object, $property)
+    {
         $classNames = array_merge([get_class($object)], array_values(class_parents(get_class($object))));
         $classNameIndex = 0;
+
+        $reflection = null;
+
         do {
             try {
                 $reflection = new \ReflectionProperty($classNames[$classNameIndex], $property);
@@ -249,15 +277,39 @@ class SimpleObjectHydrator extends ArrayHydrator
             }
         } while ($continue);
 
-        if (isset($reflection) === false || $reflection instanceof \ReflectionProperty === false) {
-            throw new \Exception(get_class($object) . '::$' . $property . ' does not exists.');
+        if ($reflection instanceof \ReflectionProperty) {
+            return $reflection;
         }
 
-        $accessible = $reflection->isPublic();
-        $reflection->setAccessible(true);
-        $value = $reflection->getValue($object);
-        $reflection->setAccessible($accessible === false);
+        throw new \Exception(get_class($object) . '::$' . $property . ' does not exists.');
+    }
 
-        return $value;
+    protected function importEmbeddedData($classMetaData, $data){
+        $result = [];
+        foreach ($data as $name => $value){
+
+            if(!$this->propertyIsEmbedded($classMetaData, $name)) {
+                $result[$name] = $value;
+                continue;
+            }
+            $pointPosition = strpos( $name, '.');
+            $result[substr($name, 0, $pointPosition)][substr($name, $pointPosition+1)] = $value;
+        }
+
+        return $result;
+    }
+
+    protected function propertyIsEmbedded($classMetaData, $name){
+        $pointPosition = strpos($name, '.');
+        if($pointPosition !== false){
+            $embeddedName = substr($name, 0, $pointPosition);
+            return !empty($classMetaData->embeddedClasses[$embeddedName]);
+        }
+        return false;
+    }
+
+    protected function hydrateEmbedded($classMetaData, $name, $value)
+    {
+        return $this->doHydrateRowData($classMetaData->embeddedClasses[$name]["class"], $value);
     }
 }
